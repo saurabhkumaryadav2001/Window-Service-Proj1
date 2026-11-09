@@ -1,0 +1,12 @@
+using System.IO.Compression;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+namespace SmartBackup.Worker;
+public sealed class BackupOptions { public string[] SourceDirectories { get; set; } = []; public string DestinationDirectory { get; set; } = @"D:\Backups"; public int IntervalMinutes { get; set; } = 60; public int RetentionDays { get; set; } = 14; }
+public sealed class BackupWorker(IOptions<BackupOptions> options, ILogger<BackupWorker> logger) : BackgroundService {
+ private readonly BackupOptions s=options.Value;
+ protected override async Task ExecuteAsync(CancellationToken ct) { logger.LogInformation("SmartBackup started"); while(!ct.IsCancellationRequested) { try { await BackupAsync(ct); } catch(OperationCanceledException) when(ct.IsCancellationRequested){break;} catch(Exception ex){logger.LogError(ex,"Backup cycle failed");} await Task.Delay(TimeSpan.FromMinutes(Math.Clamp(s.IntervalMinutes,1,1440)),ct); } }
+ private async Task BackupAsync(CancellationToken ct) { Directory.CreateDirectory(s.DestinationDirectory); var dest=Path.GetFullPath(s.DestinationDirectory); foreach(var raw in s.SourceDirectories??[]) { ct.ThrowIfCancellationRequested(); var src=Path.GetFullPath(raw); if(!Directory.Exists(src)){logger.LogWarning("Missing source {Source}",src);continue;} if(src.StartsWith(dest+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase)||src.Equals(dest,StringComparison.OrdinalIgnoreCase)){logger.LogWarning("Skipping destination as source {Source}",src);continue;} var n=Path.GetFileName(src.TrimEnd(Path.DirectorySeparatorChar)); var zip=Path.Combine(dest,n+"-"+DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")+".zip"); logger.LogInformation("Backup started {Source}",src); await Task.Run(()=>ZipFile.CreateFromDirectory(src,zip,CompressionLevel.Optimal,true),ct); logger.LogInformation("Backup successful {Archive}",zip); } Cleanup(dest); }
+ private void Cleanup(string d){var cutoff=DateTime.UtcNow.AddDays(-Math.Clamp(s.RetentionDays,1,3650));foreach(var f in Directory.EnumerateFiles(d,"*.zip"))try{if(File.GetCreationTimeUtc(f)<cutoff)File.Delete(f);}catch(Exception ex){logger.LogWarning(ex,"Retention cleanup failed for {File}",f);}}
+}
